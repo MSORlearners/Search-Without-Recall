@@ -1,18 +1,3 @@
-Great idea. For a tidy, review-friendly research repo, I recommend adding a few lightweight, standard files:
-
-* `pyproject.toml` (build + tooling; pins Python version, declares dependencies, configures black/isort/ruff/pytest)
-* `requirements.txt` (simple install path; mirrors `pyproject` dependencies)
-* `.gitignore` (Python, venv, cache, build)
-* `LICENSE` (you already have it)
-* `examples/` (tiny runnable script to reproduce a figure/table)
-* `tests/` (at least a smoke test to ensure functions import/run)
-* `CITATION.cff` (optional now; can remain double-blind)
-* `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md` (optional—nice for public release)
-
-Below is an updated **README.md** that references these files and matches your double-blind setup.
-
----
-
 # Search Without Recall – Algorithms Repository
 
 This repository provides reference implementations of the algorithms in the appendix of the working paper *“Search Without Recall and Gaussian Learning: Structural Properties and Optimal Policies.”* The goal is to make **Algorithms 1–4** easy to run and verify; additional functions are supportive (interpolation, convergence checks, etc.).
