@@ -3,24 +3,35 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gaussian-search"
+name = "search-without-recall-algorithms"
 version = "0.1.0"
-description = "Dynamic programming algorithms for Search Without Recall with Gaussian learning."
+description = "Algorithms 1–4 for Search Without Recall and Gaussian Learning (double-blind)"
 readme = "README.md"
 requires-python = ">=3.9"
-authors = [{ name = "Zixin (Stephen) Xu" }]
 license = { text = "MIT" }
 dependencies = [
-  "numpy>=1.24",
-  "pandas>=2.0",
+  "numpy>=1.23",
+  "pandas>=1.5",
   "scipy>=1.10",
+  # Numba is optional but recommended:
+  "numba>=0.58; platform_python_implementation == 'CPython'"
 ]
 
-[project.optional-dependencies]
-accel = ["numba>=0.59"]
-
 [tool.setuptools]
-package-dir = {"" = "src"}
+py-modules = ["algorithm"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+# Optional dev tooling (editors can ignore safely)
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311"]
+
+[tool.isort]
+profile = "black"
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["."]
