@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gaussian-search"
+version = "0.1.0"
+description = "Dynamic programming algorithms for Search Without Recall with Gaussian learning."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Zixin (Stephen) Xu" }]
+license = { text = "MIT" }
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+accel = ["numba>=0.59"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
