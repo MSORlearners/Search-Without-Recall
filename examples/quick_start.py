@@ -36,7 +36,7 @@ def demo_algorithm_1():
     n, delta = 40, 0.9
 
     # Over (mu, c) when 0 < delta < 1, or over c when delta = 1
-    S_df, c_grid, mu_grid = S_fast(mu_flag, sigma_flag, alpha0, nu0, n, delta, beta, G)
+    S_df= S_fast(mu_flag, sigma_flag, alpha0, nu0, n, delta, beta, G)[0]
     print("S_fast output (head):")
     print(S_df.head())
 
@@ -66,10 +66,10 @@ def demo_algorithm_3():
     mu_flag, sigma_flag = 0, 0
     beta, G = 1.0, 40
     n, delta = 40, 0.9
-    S_df, _, _ = S_fast(mu_flag, sigma_flag, alpha0, nu0, n, delta, beta, G)
+    S_df= S_fast(mu_flag, sigma_flag, alpha0, nu0, n, delta, beta, G)[0]
 
     # Pick a representative state for the threshold computation
-    k = 2
+    k = 3
     mu_prev = 0.0
     sigma_prev = 1.0
     C = 1.0  # cost parameter
@@ -115,5 +115,4 @@ if __name__ == "__main__":
     demo_algorithm_1()
     demo_algorithm_2()
     demo_algorithm_3()
-    # Algorithm 4 can be slower; still runs with tiny G and low iters above
     demo_algorithm_4()
