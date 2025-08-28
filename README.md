@@ -1,8 +1,23 @@
+Great idea. For a tidy, review-friendly research repo, I recommend adding a few lightweight, standard files:
+
+* `pyproject.toml` (build + tooling; pins Python version, declares dependencies, configures black/isort/ruff/pytest)
+* `requirements.txt` (simple install path; mirrors `pyproject` dependencies)
+* `.gitignore` (Python, venv, cache, build)
+* `LICENSE` (you already have it)
+* `examples/` (tiny runnable script to reproduce a figure/table)
+* `tests/` (at least a smoke test to ensure functions import/run)
+* `CITATION.cff` (optional now; can remain double-blind)
+* `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md` (optional—nice for public release)
+
+Below is an updated **README.md** that references these files and matches your double-blind setup.
+
+---
+
 # Search Without Recall – Algorithms Repository
 
-This repository provides reference implementations of the algorithms described in the appendix of the working paper *“Search Without Recall and Gaussian Learning: Structural Properties and Optimal Policies”*.
+This repository provides reference implementations of the algorithms in the appendix of the working paper *“Search Without Recall and Gaussian Learning: Structural Properties and Optimal Policies.”* The goal is to make **Algorithms 1–4** easy to run and verify; additional functions are supportive (interpolation, convergence checks, etc.).
 
-The code is written in Python and makes heavy use of Numba for acceleration. Each algorithm in the paper corresponds to a callable function in `algorithm.py`, with additional support routines for interpolation, convergence checks, and infinite-horizon limits.
+> Double-blind note: author names are intentionally omitted.
 
 ---
 
@@ -10,85 +25,113 @@ The code is written in Python and makes heavy use of Numba for acceleration. Eac
 
 ```
 .
-├── algorithm.py     # Core implementations (Algorithms 1–4 + helpers)
-├── README.md        # This file
+├── algorithm.py          # Implementations of Algorithms 1–4 + helpers (annotated, no logic changes)
+├── README.md             # This document
+├── LICENSE               # MIT License (standalone)
+├── pyproject.toml        # Build + tooling (PEP 621), optional but recommended
+├── requirements.txt      # Minimal dependency pinning for pip users
+├── .gitignore            # Python, build, venv, cache
+├── examples/
+│   └── quick_start.py    # Minimal runnable demo (Algorithm 1)
+└── tests/
+    └── test_import.py    # Smoke test: imports and a short run
 ```
 
 ---
 
-## Algorithms
+## Algorithms (paper appendix alignment)
 
-### Algorithm 1 — Scaled foresight recursion
+* **Algorithm 1 — Scaled foresight recursion**
+  Functions: `S_fast`, `_S_fast_compute_delta1`, `_S_fast_compute_delta_less1`, `S_c0`
+  Computes $S_{n,k}$ over $(\mu, c)$ for $0<\delta<1$ or over $c$ for $\delta=1$.
 
-* **Functions**: `S_fast`, `_S_fast_compute_delta1`, `_S_fast_compute_delta_less1`, `S_c0`
-* Implements the backward recursion for finite horizon $n$, computing the scaled foresight function $S_{n,k}$ over $(μ,c)$ when $δ<1$, or over $c$ alone when $δ=1$.
+* **Algorithm 2 — Minimum horizon table**
+  Function: `data_n_min`
+  Produces the table $k \mapsto n^{*}(k)$ by scanning horizons.
 
-### Algorithm 2 — Minimum horizon table
+* **Algorithm 3 — Thresholds**
+  Function: `threshold`
+  Locates decision thresholds $\xi_k$ (accept/continue) on the standardized grid.
 
-* **Function**: `data_n_min`
-* Computes the smallest horizon $n$ at which acceptance occurs for each $k$. Produces a table of $k \mapsto n^*(k)$.
+* **Algorithm 4 — Infinite horizon & critical discount factors**
+  Functions: `S_c0_infinite`, `S_infinite`, `k_doublestar`, `delta_star`, `delta_k_star`
+  Computes infinite-horizon limits $S_k$, the index $k^{**}$, and critical $\delta$.
 
-### Algorithm 3 — Thresholds
+* **Support routines**
+  `get_S_value`, `get_S0_value` for safe interpolation/value extraction.
 
-* **Function**: `threshold`
-* Locates threshold points $ξ_k$ that separate “accept” and “continue” regions. Works both in finite-horizon and infinite-horizon settings.
+---
 
-### Algorithm 4 — Infinite horizon and critical discount factors
+## Installation
 
-* **Functions**: `S_c0_infinite`, `S_infinite`, `k_doublestar`, `delta_star`, `delta_k_star`
-* Computes infinite-horizon limits of $S$, identifies the $k^{**}$ index, and locates critical discount factors $δ^*$ at which policy shifts occur.
+### Option A — pip (simple)
 
-### Support routines
+```bash
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-* **Functions**: `get_S_value`, `get_S0_value`
-* Provide interpolation and value extraction from computed matrices.
-* Used internally by Algorithms 2–4.
+### Option B — pyproject (recommended)
+
+If you use a modern build tool (pip ≥23.1 supports PEP 517/518):
+
+```bash
+pip install .
+```
+
+This will read `pyproject.toml` and install dependencies and the package in editable mode (if configured).
+
+> **Numba is optional**; if present, the code JIT-accelerates automatically.
 
 ---
 
 ## Quick Start
 
-```bash
-# Clone the repository
-git clone <repo-url>
-cd <repo-folder>
-
-# (Optional) create and activate a virtual environment
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-Minimal usage example:
-
 ```python
 from algorithm import S_fast
 
-# Parameters
-alpha0, nu0, mu, sigma, beta, G = -0.5, 0, 0, 0, 1, 100
+alpha0, nu0 = -0.5, 0.0
+mu_flag, sigma_flag = 0, 0
+beta, G = 1.0, 100
 n, delta = 100, 0.9
 
-# Run Algorithm 1
-S_df, c_grid, mu_grid = S_fast(mu, sigma, alpha0, nu0, n, delta, beta, G)
+S_df, c_grid, mu_grid = S_fast(mu_flag, sigma_flag, alpha0, nu0, n, delta, beta, G)
 print(S_df.head())
+```
+
+For more examples, see `examples/quick_start.py`.
+
+---
+
+## Testing
+
+```bash
+# With pyproject: (if pytest listed)
+pytest -q
+# Or minimal smoke test
+python -c "import algorithm; print('ok')"
 ```
 
 ---
 
-## Citation
+## Reproducibility Notes
 
-If you use this code in your research, please cite the working paper:
+* The grids are deterministic given `(G, rho, Z, ita)`.
+* Numba may change runtime but not results.
+* For very high $\delta$ the code increases $n$ adaptively; see the Algorithm 4 functions for stopping criteria.
 
-```
-@misc{search_gaussian_learning,
-  title   = {Search Without Recall and Gaussian Learning: Structural Properties and Optimal Policies},
-  note    = {Working paper},
-  year    = {2025}
-}
-```
+---
+
+## Citation (double-blind)
+
+If you use this code, please cite:
+
+> *Search Without Recall and Gaussian Learning: Structural Properties and Optimal Policies* (authors blinded).
+> See appendix for Algorithms 1–4.
 
 ---
 
 ## License
 
-This repository is released under the MIT License. See `LICENSE` for details.
+Released under the **MIT License**. See `LICENSE`.
