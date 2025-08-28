@@ -1,0 +1,15 @@
+# venv & python cache
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# build artifacts
+build/
+dist/
+*.egg-info/
+
+# IDEs
+.vscode/
+.idea/
