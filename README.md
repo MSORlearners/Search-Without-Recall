@@ -1,105 +1,94 @@
-# Search Without Recall & Gaussian Learning — Algorithms
+# Search Without Recall – Algorithms Repository
 
-This repository implements the algorithms from the appendix of the working paper **“Search Without Recall and Gaussian Learning: Structural Properties and Optimal Policies.”**  
-The purpose of this repository is to provide reproducible implementations of **Algorithms 1–4** listed in the paper’s appendix, with additional helper functions for posterior updates, interpolation, and convergence checks.
+This repository provides reference implementations of the algorithms described in the appendix of the working paper *“Search Without Recall and Gaussian Learning: Structural Properties and Optimal Policies”*.
 
-> Double-blind note: author names are intentionally omitted.
+The code is written in Python and makes heavy use of Numba for acceleration. Each algorithm in the paper corresponds to a callable function in `algorithm.py`, with additional support routines for interpolation, convergence checks, and infinite-horizon limits.
+
+---
+
+## Repository Structure
+
+```
+.
+├── algorithm.py     # Core implementations (Algorithms 1–4 + helpers)
+├── README.md        # This file
+```
 
 ---
 
 ## Algorithms
 
-- **Algorithm 1 – Scaled foresight recursion**  
-  Backward recursion for the scaled foresight \( S_{n,k} \) on non-uniform grids, supporting both \(\delta=1\) and \(0<\delta<1\).
+### Algorithm 1 — Scaled foresight recursion
 
-- **Algorithm 2 – Critical sample size \(k^\*\)**  
-  Iteratively finds the largest horizon \(n\) for which very large offers are still rejected, giving \(k^\*(n,\delta)\).
+* **Functions**: `S_fast`, `_S_fast_compute_delta1`, `_S_fast_compute_delta_less1`, `S_c0`
+* Implements the backward recursion for finite horizon $n$, computing the scaled foresight function $S_{n,k}$ over $(μ,c)$ when $δ<1$, or over $c$ alone when $δ=1$.
 
-- **Algorithm 3 – Accept/continue thresholds**  
-  Recovers thresholds \((\xi^\ell_k,\xi^h_k)\) via grid search over standardized space \( \hat x \in [-\tau_k,\tau_k] \).
+### Algorithm 2 — Minimum horizon table
 
-- **Algorithm 4 – Infinite-horizon limit**  
-  Computes \( S_k \) and \( k^{\*\*}(\delta) = \lim_{n \to \infty} k^\*(n,\delta) \) via convergence in \(n\).
+* **Function**: `data_n_min`
+* Computes the smallest horizon $n$ at which acceptance occurs for each $k$. Produces a table of $k \mapsto n^*(k)$.
+
+### Algorithm 3 — Thresholds
+
+* **Function**: `threshold`
+* Locates threshold points $ξ_k$ that separate “accept” and “continue” regions. Works both in finite-horizon and infinite-horizon settings.
+
+### Algorithm 4 — Infinite horizon and critical discount factors
+
+* **Functions**: `S_c0_infinite`, `S_infinite`, `k_doublestar`, `delta_star`, `delta_k_star`
+* Computes infinite-horizon limits of $S$, identifies the $k^{**}$ index, and locates critical discount factors $δ^*$ at which policy shifts occur.
+
+### Support routines
+
+* **Functions**: `get_S_value`, `get_S0_value`
+* Provide interpolation and value extraction from computed matrices.
+* Used internally by Algorithms 2–4.
 
 ---
 
-## Install
+## Quick Start
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -U numpy scipy pandas numba
-````
+# Clone the repository
+git clone <repo-url>
+cd <repo-folder>
 
-*Numba is optional; the code detects it and JIT-accelerates if available.*
+# (Optional) create and activate a virtual environment
 
----
+# Install dependencies
+pip install -r requirements.txt
+```
 
-## Quick start
+Minimal usage example:
 
 ```python
-from algorithm import (
-    compute_scaled_foresight,      # Algorithm 1
-    compute_kstar_lookup,          # Algorithm 2
-    compute_thresholds,            # Algorithm 3
-    compute_infinite_horizon       # Algorithm 4
-)
+from algorithm import S_fast
 
-alpha0, nu0, delta, beta, G, n = -0.5, 0.0, 0.99, 1.0, 200, 100
+# Parameters
+alpha0, nu0, mu, sigma, beta, G = -0.5, 0, 0, 0, 1, 100
+n, delta = 100, 0.9
 
-# Algorithm 1
-S, grids = compute_scaled_foresight(mu_flag=0, sigma_flag=0,
-                                    alpha0=alpha0, nu0=nu0,
-                                    n=n, delta=delta, beta=beta, G=G)
-
-# Algorithm 2
-kstar = compute_kstar_lookup(alpha0, nu0, delta, beta, G, k_upper=14)
-
-# Algorithm 3
-thresholds = compute_thresholds(k=6, mu_prev=0.0, sigma_prev=1.0,
-                                alpha0=alpha0, nu0=nu0,
-                                delta=delta, c=0.0, S_df=S, G=G)
-
-# Algorithm 4
-S_inf, kss = compute_infinite_horizon(alpha0, nu0, delta, beta, G, k_upper=14)
+# Run Algorithm 1
+S_df, c_grid, mu_grid = S_fast(mu, sigma, alpha0, nu0, n, delta, beta, G)
+print(S_df.head())
 ```
 
 ---
 
-## Repository structure
+## Citation
+
+If you use this code in your research, please cite the working paper:
 
 ```
-algorithm.py   # implementations of Algorithms 1–4 and helper routines
-README.md      # project documentation
+@misc{search_gaussian_learning,
+  title   = {Search Without Recall and Gaussian Learning: Structural Properties and Optimal Policies},
+  note    = {Working paper},
+  year    = {2025}
+}
 ```
-
----
-
-## Citation (double-blind)
-
-If you use this code, please cite:
-
-> *Search Without Recall and Gaussian Learning: Structural Properties and Optimal Policies* (authors blinded).
-> Algorithms appear in the appendix: Algorithm 1 (scaled foresight), Algorithm 2 (critical sample size), Algorithm 3 (thresholds), Algorithm 4 (infinite horizon).
 
 ---
 
 ## License
 
-**MIT License**
-
-Copyright (c) 2025
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
+This repository is released under the MIT License. See `LICENSE` for details.
