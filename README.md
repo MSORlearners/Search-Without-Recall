@@ -10,14 +10,15 @@ This repository provides reference implementations of the algorithms in the appe
 
 ```
 .
-├── algorithm.py          # Implementations of Algorithms 1–4 + helpers (annotated, no logic changes)
+├── algorithm.py          # Implementations of Algorithms 1–4 + helpers
 ├── README.md             # This document
 ├── LICENSE               # MIT License (standalone)
 ├── pyproject.toml        # Build + tooling (PEP 621), optional but recommended
 ├── requirements.txt      # Minimal dependency pinning for pip users
 ├── .gitignore            # Python, build, venv, cache
 ├── examples/
-│   └── quick_start.py    # Minimal runnable demo (Algorithm 1)
+│   ├── quick_start.py          # Minimal runnable demos
+│   └── reproduce_figure1.py    # Figure 1 at the reported resolution
 └── tests/
     └── test_import.py    # Smoke test: imports and a short run
 ```
@@ -30,13 +31,14 @@ This repository provides reference implementations of the algorithms in the appe
   Functions: `S_fast`, `_S_fast_compute_delta1`, `_S_fast_compute_delta_less1`, `S_c0`
   Computes $S_{n,k}$ over $(\mu, c)$ for $0<\delta<1$ or over $c$ for $\delta=1$.
 
-* **Algorithm 2 — Minimum horizon table**
+* **Algorithm 2 — Maximum-horizon table**
   Function: `data_n_min`
-  Produces the table $k \mapsto n^{*}(k)$ by scanning horizons.
+  Produces the lookup table $k \mapsto n_{\max}(k)$ by scanning horizons.
 
 * **Algorithm 3 — Thresholds**
   Function: `threshold`
-  Locates decision thresholds $\xi_k$ (accept/continue) on the standardized grid.
+  Locates the offer-value thresholds $\xi_k$ (accept/continue), including
+  sign-changing, exact-grid, and tangent roots.
 
 * **Algorithm 4 — Infinite horizon & critical discount factors**
   Functions: `S_c0_infinite`, `S_infinite`, `k_doublestar`, `delta_star`, `delta_k_star`
@@ -74,11 +76,11 @@ This will read `pyproject.toml` and install dependencies and the package in edit
 ## Quick Start
 
 ```python
-from algorithm import S_fast
+from algorithm import PAPER_GRID_SIZE, S_fast
 
 alpha0, nu0 = -0.5, 0.0
 mu_flag, sigma_flag = 0, 0
-beta, G = 1.0, 100
+beta, G = 1.0, 40  # quick demonstration; use PAPER_GRID_SIZE for reported results
 n, delta = 100, 0.9
 
 S_df, c_grid, mu_grid = S_fast(mu_flag, sigma_flag, alpha0, nu0, n, delta, beta, G)
@@ -87,12 +89,19 @@ print(S_df.head())
 
 For more examples, see `examples/quick_start.py`.
 
+To reproduce Figure 1, install the optional plotting dependency and run:
+
+```bash
+pip install -e '.[plots]'
+python examples/reproduce_figure1.py /path/to/figure_1.png
+```
+
 ---
 
 ## Testing
 
 ```bash
-# With pyproject: (if pytest listed)
+pip install -e '.[dev]'
 pytest -q
 # Or minimal smoke test
 python -c "import algorithm; print('ok')"
@@ -102,9 +111,14 @@ python -c "import algorithm; print('ok')"
 
 ## Reproducibility Notes
 
-* The grids are deterministic given `(G, rho, Z, ita)`.
+* Every numerical result reported in the paper uses `G=400`, exposed as
+  `PAPER_GRID_SIZE`.
+* The state grids are deterministic given `(G, rho, Z, ita)`. The predictive
+  innovation is integrated over the full real line using Gauss--Legendre
+  quadrature after the transformation `u = tan(pi*z/2)`.
 * Numba may change runtime but not results.
-* For very high $\delta$ the code increases $n$ adaptively; see the Algorithm 4 functions for stopping criteria.
+* For very high $\delta$ the code doubles the finite truncation horizon until
+  the requested stages converge in sup norm; see the Algorithm 4 functions.
 
 ---
 

@@ -7,7 +7,7 @@ from the working paper's appendix. It uses small grids to keep runtime low.
 
 Algorithms:
 - Algorithm 1: S_fast / S_c0 (finite-horizon recursion)
-- Algorithm 2: data_n_min (minimum horizon table)
+- Algorithm 2: data_n_min (maximum-horizon table)
 - Algorithm 3: threshold (decision thresholds)
 - Algorithm 4: S_c0_infinite / S_infinite / k_doublestar / delta_star / delta_k_star
 """
@@ -47,7 +47,7 @@ def demo_algorithm_1():
 
 
 def demo_algorithm_2():
-    print("\n=== Algorithm 2: Minimum horizon table n*(k) ===")
+    print("\n=== Algorithm 2: Maximum-horizon table ===")
     # Keep tiny k_upper for a fast demo
     alpha0, nu0 = -0.5, 0.0
     mu_flag, sigma_flag = 0, 0
@@ -55,7 +55,7 @@ def demo_algorithm_2():
     delta, k_upper = 0.9, 3
 
     table = data_n_min(mu_flag, sigma_flag, alpha0, nu0, delta, beta, G, k_upper)
-    print("n*(k) table:")
+    print("Maximum-horizon table:")
     print(table)
 
 
@@ -75,7 +75,7 @@ def demo_algorithm_3():
     C = 1.0  # cost parameter
 
     roots = threshold(k, mu_prev, sigma_prev, alpha0, nu0, delta, S_df, C)
-    print(f"Threshold roots for k={k}:")
+    print(f"Offer-value thresholds for k={k}:")
     pprint(roots)
 
 
@@ -106,7 +106,7 @@ def demo_algorithm_4():
     print(f"delta* (approx, k_min): {delta_star_val}")
 
     # Critical discount factor at selected k
-    k = 2
+    k = 3
     delta_k_val = delta_k_star(k, mu_flag, sigma_flag, alpha0, nu0, beta, G, tol=1e-4, max_iter=10)
     print(f"delta*_k (approx, k={k}): {delta_k_val}")
 

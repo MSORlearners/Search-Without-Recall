@@ -8,8 +8,8 @@ Provide a clean, double-blind implementation of the *algorithms* in the appendix
 of the working paper “Search Without Recall and Gaussian Learning:
 Structural Properties and Optimal Policies.”
 
-Only *descriptions, ordering, and comments* have been added below. The numerical
-code paths are unchanged.
+The implementation follows the algorithms in the paper and uses full-support
+quadrature for the predictive innovations.
 
 Organization
 ------------
@@ -37,6 +37,7 @@ import math
 import numpy as np
 import pandas as pd
 from scipy.stats import t, norm
+from scipy.optimize import bisect, minimize_scalar
 import pandas as pd
 from functools import lru_cache
 from multiprocessing import Pool
@@ -47,6 +48,10 @@ try:
     _has_numba = True
 except ImportError:
     _has_numba = False
+
+
+# Resolution used for every numerical result reported in the paper.
+PAPER_GRID_SIZE = 400
 
 
 # --------------------------------------
@@ -92,27 +97,79 @@ def _norm_pdf(x):
 @njit
 def _make_grids(G, rho=0.85, Z=30, ita=0.75):
     """
-    Non-uniform grids used by the recursions:
+    Grids and full-support quadrature used by the recursions:
     - c[j] : cost grid, decreasing in j
-    - z[j] : integration grid (u-grid)
-    - mu_grid[j] : μ-grid (aligned with z)
-    - dz[j] : centered differences for integration
+    - z[j] : Student/Normal integration nodes on the real line
+    - mu_grid[j] : bounded non-uniform μ-grid
+    - dz[j] : transformed Gauss--Legendre quadrature weights in du
+
+    The state grid remains bounded by ``Z``.  The integration grid must not be
+    truncated at the same bound: under Jeffreys' prior the initial predictive
+    distribution is t_2 and omitted tail contributions decay only as O(1/Z).
+    We therefore write u = tan(theta) and apply Gauss--Legendre quadrature on
+    theta in (-pi/2, pi/2), which covers the full real line for every G.
     """
-    # precompute c[j], z[j], mu_grid[j], and dz[j] = (z[j+1]-z[j-1])/2
+    # Precompute the cost and state grids.
     c       = np.empty(G+2, dtype=np.float64)
     z       = np.empty(G+2, dtype=np.float64)
     mu_grid = np.empty(G+2, dtype=np.float64)
     for j in range(G+2):
         c[j]       = G * rho**j
-        z[j]       = Z * ((1-ita)*(2*j-G-1)/(G-1) + ita*((2*j-G-1)/(G-1))**3)
-        mu_grid[j] = z[j]
+        x = (2*j-G-1)/(G-1)
+        mu_grid[j] = Z * ((1-ita)*x + ita*x**3)
     c[G] = 0.0
-    # simple forward/backward for boundary dz
+
+    # Gauss--Legendre nodes and weights on [-1, 1].  Computing them here keeps
+    # the grid builder compatible with Numba and avoids a second grid-size
+    # parameter in the public API.
     dz = np.empty_like(z)
-    dz[0]    = z[1] - z[0]
-    dz[-1]   = z[-1] - z[-2]
-    for j in range(1, G+1):
-        dz[j] = 0.5*(z[j+1] - z[j-1])
+    nodes = np.empty(G, dtype=np.float64)
+    weights = np.empty(G, dtype=np.float64)
+    half = (G + 1)//2
+    for i in range(half):
+        root = math.cos(math.pi*(i + 0.75)/(G + 0.5))
+        derivative = 0.0
+        for _ in range(100):
+            p_prev = 1.0
+            p_curr = root
+            if G == 1:
+                p_curr = root
+                p_prev = 1.0
+            else:
+                for degree in range(2, G + 1):
+                    p_next = ((2*degree - 1)*root*p_curr - (degree - 1)*p_prev)/degree
+                    p_prev = p_curr
+                    p_curr = p_next
+            derivative = G*(root*p_curr - p_prev)/(root*root - 1.0)
+            updated = root - p_curr/derivative
+            if abs(updated - root) < 1e-15:
+                root = updated
+                break
+            root = updated
+        # Re-evaluate the derivative at the converged root.
+        p_prev = 1.0
+        p_curr = root
+        if G > 1:
+            for degree in range(2, G + 1):
+                p_next = ((2*degree - 1)*root*p_curr - (degree - 1)*p_prev)/degree
+                p_prev = p_curr
+                p_curr = p_next
+        derivative = G*(root*p_curr - p_prev)/(root*root - 1.0)
+        weight = 2.0/((1.0 - root*root)*derivative*derivative)
+        nodes[i] = -root
+        nodes[G - 1 - i] = root
+        weights[i] = weight
+        weights[G - 1 - i] = weight
+
+    for j in range(1, G + 1):
+        theta = 0.5*math.pi*nodes[j - 1]
+        z[j] = math.tan(theta)
+        dz[j] = 0.5*math.pi*weights[j - 1]*(1.0 + z[j]*z[j])
+    # The integration loops use only indices 1,...,G.
+    z[0] = z[1]
+    z[G+1] = z[G]
+    dz[0] = 0.0
+    dz[G+1] = 0.0
     return c, z, mu_grid, dz
 
 
@@ -175,7 +232,7 @@ def _S_fast_compute_delta1(mu_flag, sigma_flag, alpha0, nu0, n, delta, beta, G):
 
                     val = max(0.0, (-1+delta*mu_u)*z[j_u] + s*S_u - c[j_c])
                     acc += val * pdf_val * dz[j_u]
-                S_arr[k,j_c] = beta * delta * acc
+                S_arr[k,j_c] = delta * acc
     return S_arr, k_min, c, mu_grid
 
 @njit(parallel=True)
@@ -686,21 +743,21 @@ def get_S_value(S_df, k, mu_val, c_val):
 
 
 # =========================================
-# Algorithm 2 — k*(n, δ) / minimum n table
+# Algorithm 2 — k*(n, δ) / maximum-horizon table
 # =========================================
-# This routine scans horizons n for each k and reports the smallest
-# horizon at which very large offers start being accepted, matching the
-# appendix logic for k* (presented here as a table over k).
+# This routine scans horizons n for each k and reports the last horizon
+# associated with that critical sample size, matching Algorithm 2.
 
 def data_n_min(mu, sigma, alpha0, nu0, delta, beta, G, k_upper):    
     """
     Algorithm 2:
-    Compute the minimum n required for each k (finite-horizon k*(n, δ) table).
+    Compute the maximum horizon associated with each k in the finite-horizon
+    k*(n, δ) lookup table.  The function name is retained for compatibility.
 
     Returns
     -------
     pandas.DataFrame
-        Columns ['k', 'n_min'] with strings 'Null-*' when not applicable.
+        Columns ['k', 'n_max'] with strings 'Null-*' when not applicable.
     """
     # Determine k_min based on sigma
     if sigma == 0:
@@ -710,7 +767,7 @@ def data_n_min(mu, sigma, alpha0, nu0, delta, beta, G, k_upper):
     
     # For all other cases, proceed with normal calculation
     k_value = k_min
-    n_min =  k_value + 2
+    n_start = k_value + 2
     Results = []
     if delta<=0.998:
         n_upper=500
@@ -727,14 +784,14 @@ def data_n_min(mu, sigma, alpha0, nu0, delta, beta, G, k_upper):
                 # Calculate Lambda and tau
                 try:
                     Lambda = np.sqrt((1 - (1/nu)**2) / twoalpha)
-                    tau = (1 - delta*beta/nu)/Lambda
+                    tau = (1 - delta/nu)/Lambda
                     
                     # For delta < 1, calculate mu_star for use in convergence check
                     if abs(delta - 1.0) >= 1e-10:  # delta < 1
                         mu_star = 1/((nu0 + k_value)*Lambda)
                     
                     S_0 = 0
-                    n = max(n_min, k_value + 2)
+                    n = max(n_start, k_value + 2)
                     bound = 0
                     
                     while True:
@@ -781,9 +838,10 @@ def data_n_min(mu, sigma, alpha0, nu0, delta, beta, G, k_upper):
                             Results.append([k, 'Null'])
                         break
                     
-                    n_min = n - 1
-                    Results.append([k_value , n_min])
-                    print(f"k={k_value}, n_min={n_min}, S_0={S_0}, tau={tau}")
+                    n_max = n - 1
+                    n_start = n_max
+                    Results.append([k_value, n_max])
+                    print(f"k={k_value}, n_max={n_max}, S_0={S_0}, tau={tau}")
                     
                 except (ValueError, ZeroDivisionError) as e:
                     # Handle calculation errors (like division by zero)
@@ -795,9 +853,9 @@ def data_n_min(mu, sigma, alpha0, nu0, delta, beta, G, k_upper):
         
         k_value += 1
     
-    # Make sure we have entries for all k values from 1 to k_upper
+    # Make sure we have entries for every admissible k value.
     k_values_in_results = [row[0] for row in Results]
-    for k in range(1, k_upper + 1):
+    for k in range(k_min, k_upper + 1):
         if k not in k_values_in_results:
             Results.append([k, 'Null-Missing'])
     
@@ -805,7 +863,7 @@ def data_n_min(mu, sigma, alpha0, nu0, delta, beta, G, k_upper):
     Results.sort(key=lambda x: x[0])
     
     # Create DataFrame with headers
-    df = pd.DataFrame(Results, columns=['k', 'n_min'])
+    df = pd.DataFrame(Results, columns=['k', 'n_max'])
     df.index.name = 'Index'
     return df
 
@@ -814,188 +872,112 @@ def data_n_min(mu, sigma, alpha0, nu0, delta, beta, G, k_upper):
 # Algorithm 3 — Thresholds ξ_k (accept/continue)
 # ============================================
 
-def threshold(k, mu_prev, sigma_prev, alpha0, nu0, delta, S_df, C):
+def threshold(k, mu_prev, sigma_prev, alpha0, nu0, delta, S_df, C,
+              tol=1e-8, grid_size=1001):
+    """Compute the offer values at which stopping and continuation are equal.
+
+    The gain from continuation is evaluated as a function of the current offer
+    ``X``. Sign-changing roots are refined by bisection; roots that fall on the
+    grid are retained directly. If neither is found, convex minimization checks
+    for a tangent root. The returned list contains zero, one, or two offer-value
+    thresholds in increasing order.
     """
-    Algorithm 3:
-    Find roots of f(x) = S[k, μ, c] - c - x - (1-δ)μ over standardized grid x ∈ [-τ, τ].
-    Includes boundary handling (±τ) and the δ=1 specialization.
-    Returns a list with one or two thresholds.
-    """
-    # Calculate parameters with numerical stability checks
     nu = nu0 + k
-    if nu <= 0:
-        return []  # Invalid nu value
-    
     twoalpha = 2*alpha0 + k
-    if twoalpha <= 0:
-        return []  # Invalid twoalpha value
-    
-    # Ensure Lambda is well-defined and positive
-    Lambda_squared = max(1e-10, (1 - (1/nu)**2) / twoalpha)
-    Lambda = np.sqrt(Lambda_squared)
-    tau = (1 - 1/nu)/Lambda if Lambda > 1e-10 else 0
-    
-    # Calculate mu_star
-    mu_star = 1/(nu*Lambda)
-    
-    # Create a non-uniform grid that's denser at the edges
-    # Use more points near -tau and tau
-    num_points = 1000
-    edge_density = 0.2  # Proportion of points near edges
-    center_density = 1 - 2*edge_density
-    
-    # Create three segments of the grid
-    edge_points = int(num_points * edge_density)
-    center_points = int(num_points * center_density)
-    
-    # Left edge (near -tau)
-    left_edge = np.linspace(-tau, -0.8*tau, edge_points)
-    
-    # Center region
-    center = np.linspace(-0.8*tau, 0.8*tau, center_points)
-    
-    # Right edge (near tau)
-    right_edge = np.linspace(0.8*tau, tau, edge_points)
-    
-    # Combine the segments
-    x_grid = np.concatenate([left_edge[:-1], center[:-1], right_edge])
-    
-    roots = []
-    
-    # Different handling for delta=1 vs delta<1
-    is_delta_one = abs(delta - 1.0) < 1e-10
-    
-    def f(x):
-        try:
-            if is_delta_one:
-                # Special handling for delta=1 case
-                # For delta=1, S is indexed by 'k' and columns are 'c' values
-                
-                # Regular computation for interior points
-                a = (nu0 + k - 1)/(nu0 + k)
-                b = Lambda
-                c_squared = max(1e-10, (2*alpha0 + k - 1)*sigma_prev**2)
-                
-                # Compute denominator with stability check
-                denominator = x**2 * b**2 - a**2
-                if abs(denominator) < 1e-10:
-                    return np.nan
-                
-                # Compute (X-μ_{k-1})² with stability check
-                X_minus_mu_squared = -x**2 * b**2 * c_squared / denominator
-                if X_minus_mu_squared < 0:
-                    return np.nan
-                
-                # Compute X-μ_{k-1} with sign matching x
-                X_minus_mu = np.sqrt(X_minus_mu_squared) if x >= 0 else -np.sqrt(X_minus_mu_squared)
-                X = mu_prev + X_minus_mu
-                
-                # Compute sigma with stability check
-                sigma_squared = Lambda_squared * ((2*alpha0 + k - 1)*sigma_prev**2 + (X - mu_prev)**2)
-                if sigma_squared < 1e-10:
-                    return np.nan
-                sigma = np.sqrt(sigma_squared)
-                
-                # For delta=1, we only need c (mu is ignored)
-                c = C/sigma
-                
-                # Get S value with error handling - pass None for mu when delta=1
-                try:
-                    S_val = get_S_value(S_df, k, None, c)
-                    if np.isnan(S_val):
-                        return np.nan
-                    # For delta=1, the equation simplifies to S - c - x
-                    return S_val - c - x
-                except (ValueError, KeyError) as e:
-                    print(f"Error in S lookup for delta=1: {e}")
-                    return np.nan
-            else:
-                # Original handling for delta<1 case
-                # Special treatment at boundaries
-                if abs(x - tau) < 1e-10:  # x = τ
-                    mu = mu_star
-                    c = 0
-                elif abs(x + tau) < 1e-10:  # x = -τ
-                    mu = -mu_star
-                    c = 0
-                else:
-                    # Regular computation for interior points
-                    a = (nu0 + k - 1)/(nu0 + k)
-                    b = Lambda
-                    c_squared = max(1e-10, (2*alpha0 + k - 1)*sigma_prev**2)
-                    
-                    # Compute denominator with stability check
-                    denominator = x**2 * b**2 - a**2
-                    if abs(denominator) < 1e-10:
-                        return np.nan
-                    
-                    # Compute (X-μ_{k-1})² with stability check
-                    X_minus_mu_squared = -x**2 * b**2 * c_squared / denominator
-                    if X_minus_mu_squared < 0:
-                        return np.nan
-                    
-                    # Compute X-μ_{k-1} with sign matching x
-                    X_minus_mu = np.sqrt(X_minus_mu_squared) if x >= 0 else -np.sqrt(X_minus_mu_squared)
-                    X = mu_prev + X_minus_mu
-                    
-                    # Compute sigma with stability check
-                    sigma_squared = Lambda_squared * ((2*alpha0 + k - 1)*sigma_prev**2 + (X - mu_prev)**2)
-                    if sigma_squared < 1e-10:
-                        return np.nan
-                    sigma = np.sqrt(sigma_squared)
-                    
-                    # Compute mu and c with stability checks
-                    mu = (mu_prev + (X - mu_prev)/nu)/sigma
-                    c = C/sigma
-                
-                # Get S value with error handling
-                try:
-                    S_val = get_S_value(S_df, k, mu, c)
-                    if np.isnan(S_val):
-                        return np.nan
-                    return S_val - c - x - (1 - delta)*mu
-                except (ValueError, KeyError) as e:
-                    print(f"Error in S lookup for delta<1: {e}")
-                    return np.nan
-                
-        except (ValueError, ZeroDivisionError) as e:
-            print(f"Calculation error: {e}")
-            return np.nan
-    
-    # Find sign changes in f(x) with improved stability
-    f_values = np.array([f(x) for x in x_grid])
-    valid_indices = ~np.isnan(f_values)
-    f_values = f_values[valid_indices]
-    x_grid = x_grid[valid_indices]
-    
-    if len(f_values) < 2:
+    if nu <= 1 or twoalpha <= 0 or sigma_prev < 0 or C < 0:
         return []
-    
-    sign_changes = np.where(np.diff(np.sign(f_values)))[0]
-    
-    for idx in sign_changes:
-        x_left = x_grid[idx]
-        x_right = x_grid[idx + 1]
-        f_left = f_values[idx]
-        f_right = f_values[idx + 1]
-        
-        if f_left * f_right < 0:
-            # Better root estimation using linear interpolation
-            root = x_left - f_left * (x_right - x_left) / (f_right - f_left)
-            roots.append(root)
-        
-    return roots
+    if not 0 < delta <= 1 or tol <= 0 or grid_size < 3:
+        raise ValueError("Require 0 < delta <= 1, tol > 0, and grid_size >= 3")
+
+    Lambda_squared = (1 - (1/nu)**2) / twoalpha
+    if Lambda_squared <= 0:
+        return []
+    Lambda = math.sqrt(Lambda_squared)
+    base_scale_squared = max(1e-12, (twoalpha - 1)*sigma_prev**2)
+    base_scale = math.sqrt(base_scale_squared)
+    is_delta_one = abs(delta - 1.0) < 1e-10
+
+    def gain(X):
+        innovation = X - mu_prev
+        mu_post = mu_prev + innovation/nu
+        sigma_post = Lambda*math.sqrt(base_scale_squared + innovation**2)
+        scaled_cost = C/sigma_post
+        scaled_mu = mu_post/sigma_post
+        try:
+            S_value = get_S_value(
+                S_df, k, None if is_delta_one else scaled_mu, scaled_cost
+            )
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            return np.nan
+        if S_value is None or not np.isfinite(S_value):
+            return np.nan
+        return delta*mu_post - X + sigma_post*S_value - C
+
+    # X = mu_{k-1} + base_scale*tan(theta) maps the finite theta interval
+    # onto the full offer line. The small endpoint margin represents the two
+    # asymptotic tails without evaluating at infinity.
+    endpoint_margin = 1e-6
+    theta = np.linspace(
+        -0.5*math.pi + endpoint_margin,
+        0.5*math.pi - endpoint_margin,
+        int(grid_size),
+    )
+    offer_grid = mu_prev + base_scale*np.tan(theta)
+    gain_values = np.array([gain(X) for X in offer_grid])
+    valid = np.isfinite(gain_values)
+    offer_grid = offer_grid[valid]
+    gain_values = gain_values[valid]
+    if len(gain_values) < 3:
+        return []
+
+    roots = [
+        float(X) for X, value in zip(offer_grid, gain_values)
+        if abs(value) <= tol
+    ]
+    for i in range(len(gain_values) - 1):
+        if gain_values[i]*gain_values[i + 1] < 0:
+            root = bisect(
+                gain, offer_grid[i], offer_grid[i + 1],
+                xtol=tol, rtol=max(tol, 4*np.finfo(float).eps),
+            )
+            roots.append(float(root))
+
+    # A double root need not produce a sign change.
+    if not roots:
+        i_min = int(np.argmin(gain_values))
+        if 0 < i_min < len(offer_grid) - 1:
+            result = minimize_scalar(
+                gain,
+                bounds=(offer_grid[i_min - 1], offer_grid[i_min + 1]),
+                method="bounded",
+                options={"xatol": tol},
+            )
+            if result.success and abs(result.fun) <= tol:
+                roots.append(float(result.x))
+
+    roots.sort()
+    deduped = []
+    for root in roots:
+        if not deduped or abs(root - deduped[-1]) > 10*tol*max(1.0, abs(root)):
+            deduped.append(root)
+    return deduped[:2]
 
 
 # =====================================================
 # Algorithm 4 — Infinite horizon and critical δ values
 # =====================================================
 
-def S_c0_infinite(mu, sigma, alpha0, nu0, delta, beta, G):
+def S_c0_infinite(
+    mu, sigma, alpha0, nu0, delta, beta, G, k_upper=None, tol=1e-5, max_iter=8
+):
     """
     Algorithm 4 (c=0 slice):
-    Compute the infinite-horizon S(k, μ, 0) by growing n until convergence
-    at k_min, then return the converged S matrix and μ-grid.
+    Compute the infinite-horizon S(k, μ, 0) by doubling the truncation horizon.
+
+    Convergence is checked in sup norm over the full μ-grid and every stage
+    from k_min through k_upper, as in Algorithm 4 of the paper.  The legacy
+    ``beta`` argument is retained for API compatibility but is not a model
+    parameter.
     """
     # Determine k_min
     if sigma == 0:
@@ -1003,8 +985,12 @@ def S_c0_infinite(mu, sigma, alpha0, nu0, delta, beta, G):
     else:
         k_min = 1
     
-    # Start with a large n and compute S matrices
-    # Ensure n is always an integer and handle very high delta values
+    if not 0 < delta < 1:
+        raise ValueError("S_c0_infinite requires 0 < delta < 1")
+    if k_upper is None:
+        k_upper = k_min
+
+    # Start with a horizon scaled to the effective discount horizon.
     if 0.999<=delta<1:
         n_initial = min(int(1/(1-delta)), 10000)  # Cap at 10000 to avoid memory issues
     elif 0.995<=delta<0.999:
@@ -1013,52 +999,34 @@ def S_c0_infinite(mu, sigma, alpha0, nu0, delta, beta, G):
         n_initial = 1000
     else:
         n_initial = 500
-    n = int(n_initial)  # Ensure n is integer
-    
-    # Compute S matrices for n and n+1
-    S_n, mu_grid = S_c0(mu, sigma, alpha0, nu0, n, delta, beta, G)
-    S_n1, mu_grid = S_c0(mu, sigma, alpha0, nu0, n+1, delta, beta, G)
-    
-    # Check convergence only for k_min
-    converged = False
-    
-    iteration=0
-    while not converged and iteration<10:
-        iteration+=1
-        # Get S values for k_min
-        S_n_kmin = S_n.loc[f'k={k_min}']
-        S_n1_kmin = S_n1.loc[f'k={k_min}']
-        
-        # Compute maximum difference
-        S_n_kmin_value=get_S0_value(S_n, k_min, 0)
-        S_n1_kmin_value=get_S0_value(S_n1, k_min, 0)
-        diff = np.max(S_n1_kmin_value - S_n_kmin_value)
-        print(f"iteration={iteration}, n={n}, diff={diff:.6f}")
-        
-        if diff < 1e-4:
-            converged = True
-        else:
-            # Update for next iteration
-            if n-n_initial >2:
-                n_initial=n_initial*2
-                n=int(n_initial)  # Ensure n is integer
-                S_n, mu_grid = S_c0(mu, sigma, alpha0, nu0, n, delta, beta, G)
-            else:
-                n += 1
-                S_n = S_n1
-            S_n1, mu_grid = S_c0(mu, sigma, alpha0, nu0, n+1, delta, beta, G)
-            
-    
-    if iteration>=10:
-        print(f"Warning: Forced convergence at n={n}")
-    
-    return S_n1, mu_grid
+    n = max(int(n_initial), int(k_upper) + 2)
+    S_old, mu_grid = S_c0(mu, sigma, alpha0, nu0, n, delta, beta, G)
+    rows = [f'k={k}' for k in range(k_min, int(k_upper) + 1)]
 
-def S_infinite(mu, sigma, alpha0, nu0, delta, beta, G, k_upper):
+    for iteration in range(1, max_iter + 1):
+        new_n = 2*n
+        S_new, mu_grid = S_c0(mu, sigma, alpha0, nu0, new_n, delta, beta, G)
+        diff = float(np.max(np.abs(
+            S_new.loc[rows].to_numpy() - S_old.loc[rows].to_numpy()
+        )))
+        print(f"iteration={iteration}, n={new_n}, sup_diff={diff:.6g}")
+        if diff <= tol:
+            return S_new, mu_grid
+        n = new_n
+        S_old = S_new
+
+    raise RuntimeError(
+        f"Infinite-horizon recursion did not converge within {max_iter} doublings; "
+        f"last horizon={n}, sup-norm difference={diff:.6g}"
+    )
+
+def S_infinite(
+    mu, sigma, alpha0, nu0, delta, beta, G, k_upper, tol=1e-5, max_iter=8
+):
     """
     Algorithm 4 (general S):
-    Compute the infinite-horizon S(k, μ, c) by growing n until the k_min slice
-    stabilizes in sup norm. Returns the converged S and μ-grid.
+    Compute the infinite-horizon S(k, μ, c) by doubling the truncation horizon
+    until all requested stages stabilize in sup norm.
     """
     # Determine k_min
     if sigma == 0:
@@ -1066,43 +1034,35 @@ def S_infinite(mu, sigma, alpha0, nu0, delta, beta, G, k_upper):
     else:
         k_min = 1
     
-    # Start with a large n and compute S matrices
-    n_initial = 1000
-    n = n_initial
-    
-    # Compute S matrices for n and n+1
-    S_n, c, mu_grid = S_fast(mu, sigma, alpha0, nu0, n, delta, beta, G)
-    S_n1, c, mu_grid = S_fast(mu, sigma, alpha0, nu0, n+1, delta, beta, G)
-    
-    # Check convergence only for k_min
-    converged = False
-    n_max = 1001  # Force convergence at n=5000
-    
-    while not converged and n < n_max:
-        # Get S values for k_min
-        S_n_kmin = S_n.filter(like=f'k={k_min},', axis=0)
-        S_n1_kmin = S_n1.filter(like=f'k={k_min},', axis=0)
-        
-        if len(S_n_kmin) == 0 or len(S_n1_kmin) == 0:
-            print(f"Warning: No rows found for k={k_min}")
-            break
-        
-        # Compute maximum difference
-        diff = np.max(np.abs(S_n1_kmin - S_n_kmin))
-        print(f"n={n}, diff={diff:.6f}")
-        
-        if diff < 1e-6 or n >= n_max - 1:
-            converged = True
-        else:
-            # Update for next iteration
-            n += 1
-            S_n = S_n1
-            S_n1, c, mu_grid = S_fast(mu, sigma, alpha0, nu0, n+1, delta, beta, G)
-    
-    if n >= n_max - 1:
-        print(f"Warning: Forced convergence at n={n}")
-    
-    return S_n1, mu_grid
+    if not 0 < delta < 1:
+        raise ValueError("S_infinite requires 0 < delta < 1")
+
+    n = max(500, int(k_upper) + 2)
+    S_old, _, mu_grid = S_fast(mu, sigma, alpha0, nu0, n, delta, beta, G)
+    row_mask = np.array([
+        any(label.startswith(f'k={k},') for k in range(k_min, int(k_upper) + 1))
+        for label in S_old.index
+    ])
+    rows = S_old.index[row_mask]
+
+    for iteration in range(1, max_iter + 1):
+        new_n = 2*n
+        S_new, _, mu_grid = S_fast(
+            mu, sigma, alpha0, nu0, new_n, delta, beta, G
+        )
+        diff = float(np.max(np.abs(
+            S_new.loc[rows].to_numpy() - S_old.loc[rows].to_numpy()
+        )))
+        print(f"iteration={iteration}, n={new_n}, sup_diff={diff:.6g}")
+        if diff <= tol:
+            return S_new, mu_grid
+        n = new_n
+        S_old = S_new
+
+    raise RuntimeError(
+        f"Infinite-horizon recursion did not converge within {max_iter} doublings; "
+        f"last horizon={n}, sup-norm difference={diff:.6g}"
+    )
 
 def k_doublestar(mu, sigma, alpha0, nu0, delta, beta, G, max_k=100):
     """
@@ -1113,7 +1073,9 @@ def k_doublestar(mu, sigma, alpha0, nu0, delta, beta, G, max_k=100):
         raise ValueError("This function is only for delta < 1. For delta=1, use a different approach.")
     
     # Compute the infinite-horizon S0 values
-    S0_inf_df = S_c0_infinite(mu, sigma, alpha0, nu0, delta, beta, G)
+    S0_inf_df = S_c0_infinite(
+        mu, sigma, alpha0, nu0, delta, beta, G, k_upper=max_k
+    )
     
     # Determine k_min based on sigma
     if sigma == 0:
@@ -1138,7 +1100,7 @@ def k_doublestar(mu, sigma, alpha0, nu0, delta, beta, G, max_k=100):
         # Calculate Lambda and tau
         Lambda_squared = max(1e-10, (1 - (1/nu)**2) / twoalpha)
         Lambda = np.sqrt(Lambda_squared)
-        tau = (1 - delta*beta/nu)/Lambda
+        tau = (1 - delta/nu)/Lambda
         
         # Calculate mu_star
         mu_star = 1/(nu*Lambda)
@@ -1182,8 +1144,8 @@ def delta_star(mu, sigma, alpha0, nu0, beta, G, tol=1e-5, max_iter=100):
         k_min = 2
     
     # Binary search bounds
-    delta_low = 0.8
-    delta_high = 0.99999
+    delta_low = 1e-6
+    delta_high = 1 - 1e-6
     
     # Binary search
     iterations = 0
@@ -1198,11 +1160,14 @@ def delta_star(mu, sigma, alpha0, nu0, beta, G, tol=1e-5, max_iter=100):
             nu = nu0 + k_min
             twoalpha = 2 * alpha0 + k_min
             Lambda = np.sqrt((1 - (1/nu)**2) / twoalpha)
-            tau = (1 - delta_mid * beta / nu) / Lambda
+            tau = (1 - delta_mid / nu) / Lambda
             mu_star = 1/(nu*Lambda)
             
             # Get S0_infinite for current delta
-            S0_inf_df = S_c0_infinite(mu, sigma, alpha0, nu0, delta_mid, beta, G)
+            S0_inf_df = S_c0_infinite(
+                mu, sigma, alpha0, nu0, delta_mid, beta, G,
+                k_upper=k_min, tol=tol
+            )
             S0_val = get_S0_value(S0_inf_df, k_min, mu_star)
             S0 = float(S0_val)
             
@@ -1221,8 +1186,7 @@ def delta_star(mu, sigma, alpha0, nu0, beta, G, tol=1e-5, max_iter=100):
             # Be conservative if computation fails
             delta_high = delta_mid
     
-    # Return result (conservative bound)
-    return round(delta_low, 4)  # Return lower bound for safety
+    return 0.5*(delta_low + delta_high)
 
 def delta_k_star(k, mu, sigma, alpha0, nu0, beta, G, tol=5e-5, max_iter=100):
     """
@@ -1237,13 +1201,8 @@ def delta_k_star(k, mu, sigma, alpha0, nu0, beta, G, tol=5e-5, max_iter=100):
         return None
     
     # Binary search bounds
-    if k>5:
-        delta_low= 0.99
-    elif k>3:
-        delta_low=0.95
-    else:
-        delta_low=0.88
-    delta_high = 0.99999
+    delta_low = 1e-6
+    delta_high = 1 - 1e-6
     
     # Binary search
     iterations = 0
@@ -1260,11 +1219,14 @@ def delta_k_star(k, mu, sigma, alpha0, nu0, beta, G, tol=5e-5, max_iter=100):
             nu = nu0 + k
             twoalpha = 2 * alpha0 + k
             Lambda = np.sqrt((1 - (1/nu)**2) / twoalpha)
-            tau = (1 - delta_mid * beta / nu) / Lambda
+            tau = (1 - delta_mid / nu) / Lambda
             mu_star = 1/(nu*Lambda)
             
             # Get S0_infinite for current delta
-            S0_inf_df = S_c0_infinite(mu, sigma, alpha0, nu0, delta_mid, beta, G)
+            S0_inf_df = S_c0_infinite(
+                mu, sigma, alpha0, nu0, delta_mid, beta, G,
+                k_upper=k, tol=tol
+            )
             S0_val = get_S0_value(S0_inf_df, k, mu_star)
             S0 = float(S0_val)
             print(f"   S0={S0:.6f}, tau={tau:.6f}, diff={S0-tau:.6f}")
@@ -1282,8 +1244,7 @@ def delta_k_star(k, mu, sigma, alpha0, nu0, beta, G, tol=5e-5, max_iter=100):
             # Be conservative if computation fails
             delta_high = delta_mid
     
-    # Return result (conservative bound)
-    return round(delta_low, 5)  # Return lower bound for safety
+    return 0.5*(delta_low + delta_high)
 
 
 
@@ -1300,13 +1261,13 @@ if _has_numba:
 # --------------------------
 if __name__ == '__main__':
     import time
-    # Parameters for Table 6 (example test)
+    # Small smoke-test parameters (not the paper's reported numerical setting).
     alpha0 = -0.5
     nu0 = 0
     mu = 0
     sigma = 0
     beta = 1
-    G = 100
+    G = 40
     k_upper =14
     delta=0.9
     n=100

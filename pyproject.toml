@@ -17,6 +17,10 @@ dependencies = [
   "numba>=0.58; platform_python_implementation == 'CPython'"
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+plots = ["matplotlib>=3.7"]
+
 [tool.setuptools]
 py-modules = ["algorithm"]
 
