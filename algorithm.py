@@ -316,7 +316,7 @@ def _S_fast_compute(mu_flag, sigma_flag, alpha0, nu0, n, delta, beta, G):
     Algorithm 1 (dispatcher):
     Calls the appropriate compiled kernel depending on δ.
     """
-    if abs(delta - 1.0) < 1e-10:  # delta == 1
+    if delta == 1.0:
         return _S_fast_compute_delta1(mu_flag, sigma_flag, alpha0, nu0, n, delta, beta, G)
     else:  # delta < 1
         return _S_fast_compute_delta_less1(mu_flag, sigma_flag, alpha0, nu0, n, delta, beta, G)
@@ -340,7 +340,7 @@ def S_fast(mu_flag, sigma_flag, alpha0, nu0, n, delta, beta, G):
         # For delta=1, we have a 2D array (k, c)
         df = pd.DataFrame(S_arr[k_min:n, 1:G+1])
         # Set column labels
-        column_labels = ['c=%.1f' % c[j] for j in range(1, G+1)]
+        column_labels = [f'c={float(c[j])!r}' for j in range(1, G+1)]
         df.columns = column_labels
         # Set row labels
         row_labels = ['n=%d, k_min=%d, k=%d' % (n, k_min, k) for k in range(k_min, n)]
@@ -353,10 +353,10 @@ def S_fast(mu_flag, sigma_flag, alpha0, nu0, n, delta, beta, G):
         for k in range(k_min, n):
             for j_c in range(1, G+1):
                 rows.append(S_arr[k, 1:G+1, j_c])  # Only use indices 1 to G+1
-                row_labels.append('k=%d, c=%.6f' % (k, c[j_c]))
+                row_labels.append(f'k={k}, c={float(c[j_c])!r}')
         df = pd.DataFrame(rows)
         # Set column labels
-        column_labels = ['mu=%.6f' % mu_grid[j_mu] for j_mu in range(1, G+1)]
+        column_labels = [f'mu={float(mu_grid[j_mu])!r}' for j_mu in range(1, G+1)]
         df.columns = column_labels
         # Set row labels
         df.index = row_labels
@@ -491,7 +491,7 @@ def S_c0(mu_flag, sigma_flag, alpha0, nu0, n, delta, beta, G):
         
         # Create column labels with proper numerical ordering
         # First create a list of (mu_value, label) pairs
-        mu_labels = [(mu_grid[j_mu], f'mu={mu_grid[j_mu]:.6f}') for j_mu in range(1, G+1)]
+        mu_labels = [(mu_grid[j_mu], f'mu={float(mu_grid[j_mu])!r}') for j_mu in range(1, G+1)]
         
         # Extract just the labels in sorted order
         column_labels = [label for _, label in mu_labels]
@@ -515,231 +515,83 @@ def S_c0(mu_flag, sigma_flag, alpha0, nu0, n, delta, beta, G):
 # Helpers: value extraction & interpolation
 # ---------------------------------------------
 
+def _grid_bracket(grid, value):
+    """Return positions and a weight, using the end interval for extrapolation."""
+    grid = np.asarray(grid, dtype=float)
+    if grid.ndim != 1 or len(grid) == 0 or not np.all(np.isfinite(grid)):
+        raise ValueError("Grid coordinates must be a nonempty finite vector.")
+    if value is None or not np.isfinite(value):
+        raise ValueError("A finite interpolation coordinate is required.")
+    order = np.argsort(grid)
+    coordinates = grid[order]
+    if np.any(np.diff(coordinates) <= 0):
+        raise ValueError("Duplicate grid coordinates; recompute tables with unrounded labels.")
+    if len(grid) == 1:
+        if value != coordinates[0]:
+            raise ValueError("Cannot extrapolate from a single grid point.")
+        return int(order[0]), int(order[0]), 0.0
+    i = int(np.clip(np.searchsorted(coordinates, value) - 1, 0, len(grid) - 2))
+    weight = (value - coordinates[i]) / (coordinates[i + 1] - coordinates[i])
+    return int(order[i]), int(order[i + 1]), float(weight)
+
+
+def _label_fields(label):
+    return dict(part.strip().split("=", 1) for part in label.split(","))
+
+
+def _check_table_labels(table):
+    if not table.index.is_unique or not table.columns.is_unique:
+        raise ValueError("Duplicate table labels; recompute tables with unrounded labels.")
+
+
 def get_S0_value(S0_df_tuple, k, mu_val):
+    """Read S(k, mu, 0), with linear interpolation and end-interval extrapolation.
+
+    Accepts S_c0's (DataFrame, exact mean grid) or a DataFrame alone.
+    Missing stages and ambiguous legacy tables raise an error.
     """
-    Helper: extract S0(k, μ) from S_c0(...) output using (at most) linear
-    interpolation in μ (when δ<1). Accepts (DataFrame, μ-grid) or just DataFrame.
-    """
-    # Handle both DataFrame and (DataFrame, mu_grid) tuple formats
-    if isinstance(S0_df_tuple, tuple) and len(S0_df_tuple) == 2:
+    if isinstance(S0_df_tuple, tuple):
         S0_df, mu_grid = S0_df_tuple
     else:
-        S0_df = S0_df_tuple
-        mu_grid = None
-    
-    # Check if DataFrame has a simple structure (delta=1 case) or complex structure (delta<1 case)
-    is_delta_one = len(S0_df.columns) == 1 and S0_df.columns[0] == 'S0'
-    
-    # Get available k values
-    available_k = sorted(set(int(label.split('=')[1]) for label in S0_df.index))
-    if k not in available_k:
-        print(f"Error: k={k} not found in available k values: {available_k}")
-        return None
-    
-    # Handle delta=1 case
-    if is_delta_one:
-        # For delta=1, we directly return the value for this k
-        # mu_val is ignored since it doesn't affect the result
-        try:
-            val = S0_df.loc[f'k={k}', 'S0']
-            return val.iloc[0] if hasattr(val, 'iloc') else val
-        except (KeyError, ValueError) as e:
-            print(f"Error accessing k={k} in delta=1 format: {e}")
-            return 0.0
-    
-    # Handle delta<1 case with exact mu_grid for more precise interpolation
-    else:
-        if mu_val is None:
-            raise ValueError("mu_val cannot be None for delta<1 case")
-            
-        # Using mu_grid for precise interpolation if available
-        if mu_grid is not None:
-            # Find the appropriate mu indices for interpolation
-            i_mu = len(mu_grid) - 1
-            while i_mu > 1 and mu_val < mu_grid[i_mu]:
-                i_mu -= 1
-                
-            # Ensure we don't go out of bounds
-            if i_mu >= len(mu_grid) - 1:
-                i_mu = len(mu_grid) - 2
-                
-            mu_lower = mu_grid[i_mu]
-            mu_upper = mu_grid[i_mu + 1]
-            
-            # Calculate interpolation weight
-            w_mu = (mu_val - mu_lower) / (mu_upper - mu_lower) if mu_upper != mu_lower else 0
-            
-            # Get the values from the DataFrame
-            try:
-                S_lower = S0_df.loc[f'k={k}', f'mu={mu_lower:.6f}']
-                S_upper = S0_df.loc[f'k={k}', f'mu={mu_upper:.6f}']
-                
-                # Extract scalar values from Series if needed
-                S_lower = S_lower.iloc[0] if hasattr(S_lower, 'iloc') else S_lower
-                S_upper = S_upper.iloc[0] if hasattr(S_upper, 'iloc') else S_upper
-                
-                # Perform linear interpolation
-                S_interp = S_lower * (1 - w_mu) + S_upper * w_mu
-                return S_interp
-            except (KeyError, ValueError) as e:
-                print(f"Error in interpolation using mu_grid for k={k}, mu={mu_val}: {e}")
-                # Try to find closest mu value as fallback
-                try:
-                    closest_mu = min(mu_grid[1:len(mu_grid)-1], key=lambda x: abs(x - mu_val))
-                    val = S0_df.loc[f'k={k}', f'mu={closest_mu:.6f}']
-                    return val.iloc[0] if hasattr(val, 'iloc') else val
-                except (KeyError, ValueError) as e:
-                    print(f"Fallback using mu_grid also failed: {e}")
-                    return 0.0
-        else:
-            # Fallback to using column headers if mu_grid is not available
-            mu_columns = [float(col.split('=')[1]) for col in S0_df.columns]
-            mu_lower = max([m for m in mu_columns if m <= mu_val], default=mu_columns[0])
-            mu_upper = min([m for m in mu_columns if m >= mu_val], default=mu_columns[-1])
-            
-            if mu_lower == mu_upper:
-                mu_upper = mu_columns[min(mu_columns.index(mu_lower) + 1, len(mu_columns)-1)]
-            
-            # Get the values for linear interpolation
-            try:
-                S_lower = S0_df.loc[f'k={k}', f'mu={mu_lower:.6f}']
-                S_upper = S0_df.loc[f'k={k}', f'mu={mu_upper:.6f}']
-                
-                # Extract scalar values from Series if needed
-                S_lower = S_lower.iloc[0] if hasattr(S_lower, 'iloc') else S_lower
-                S_upper = S_upper.iloc[0] if hasattr(S_upper, 'iloc') else S_upper
-                
-                # Calculate interpolation weight
-                w_mu = (mu_val - mu_lower) / (mu_upper - mu_lower) if mu_upper != mu_lower else 0
-                
-                # Perform linear interpolation
-                S_interp = S_lower * (1 - w_mu) + S_upper * w_mu
-                return S_interp
-            except (KeyError, ValueError) as e:
-                print(f"Error in interpolation using column headers for k={k}, mu={mu_val}: {e}")
-                # Try direct access as a fallback
-                try:
-                    closest_mu = min(mu_columns, key=lambda x: abs(x - mu_val))
-                    val = S0_df.loc[f'k={k}', f'mu={closest_mu:.6f}']
-                    return val.iloc[0] if hasattr(val, 'iloc') else val
-                except (KeyError, ValueError) as e:
-                    print(f"All fallbacks failed: {e}")
-                    return 0.0
+        S0_df, mu_grid = S0_df_tuple, None
+    _check_table_labels(S0_df)
+    row = S0_df.loc[f'k={k}']
+    if list(S0_df.columns) == ['S0']:
+        return float(row.iloc[0])
+    if mu_grid is None:
+        mu_grid = [float(_label_fields(col)['mu']) for col in S0_df.columns]
+    if len(mu_grid) != len(row):
+        raise ValueError("Mean grid length does not match the table columns.")
+    lower, upper, weight = _grid_bracket(mu_grid, mu_val)
+    return float((1 - weight) * row.iloc[lower] + weight * row.iloc[upper])
+
 
 def get_S_value(S_df, k, mu_val, c_val):
+    """Read S(k, mu, c) by (bi)linear interpolation.
+
+    Labels retain full-precision coordinates. Out-of-grid values use the
+    adjacent end interval, as in the Bellman kernels. Rounded legacy tables
+    with duplicate labels must be recomputed.
     """
-    Helper: extract S(k, μ, c) from S_fast(...) output by
-    (bi)linear interpolation. Supports both δ=1 (c-only columns)
-    and δ<1 (μ-columns with stacked (k,c) rows).
-    """
-    # Handle delta < 1 case with mu columns
-    if 'mu=' in S_df.columns[0]:
-        if mu_val is None:
-            raise ValueError("mu_val cannot be None when delta < 1")
-        
-        # Get available k values
-        available_k = sorted(set(int(label.split('k=')[1].split(',')[0]) 
-                            for label in S_df.index if 'k=' in label))
-        
-        if k not in available_k:
-            print(f"Error: k={k} not found in available k values: {available_k}")
-            return None
-            
-        # Get available mu values from columns
-        mu_columns = [float(col.split('=')[1]) for col in S_df.columns]
-        mu_lower = max([m for m in mu_columns if m <= mu_val], default=mu_columns[0])
-        mu_upper = min([m for m in mu_columns if m >= mu_val], default=mu_columns[-1])
-        
-        if mu_lower == mu_upper:
-            mu_upper = mu_columns[min(mu_columns.index(mu_lower) + 1, len(mu_columns)-1)]
-        
-        # Get available c values from index for this k
-        c_values = [float(label.split('c=')[1]) for label in S_df.index 
-                   if f'k={k}' in label and 'c=' in label]
-        c_values = sorted(set(c_values))
-        
-        c_lower = max([c for c in c_values if c <= c_val], default=c_values[0])
-        c_upper = min([c for c in c_values if c >= c_val], default=c_values[-1])
-        
-        if c_lower == c_upper:
-            c_upper = c_values[min(c_values.index(c_lower) + 1, len(c_values)-1)]
-        
-        # Safe lookup function to handle potential KeyError and Series returns
-        def get_value(k_val, c_val, mu_val):
-            try:
-                row_label = f'k={k_val}, c={c_val:.6f}'
-                col_label = f'mu={mu_val:.6f}'
-                value = S_df.loc[row_label, col_label]
-                return value.iloc[0] if hasattr(value, 'iloc') else value
-            except (KeyError, ValueError) as e:
-                print(f"Warning: Error accessing {row_label}, {col_label}: {e}")
-                return 0.0
-        
-        # Get the four corner values for bilinear interpolation
-        S_ll = get_value(k, c_lower, mu_lower)
-        S_lu = get_value(k, c_lower, mu_upper)
-        S_ul = get_value(k, c_upper, mu_lower)
-        S_uu = get_value(k, c_upper, mu_upper)
-        
-        # Calculate interpolation weights
-        w_mu = (mu_val - mu_lower) / (mu_upper - mu_lower) if mu_upper != mu_lower else 0
-        w_c = (c_val - c_lower) / (c_upper - c_lower) if c_upper != c_lower else 0
-        
-        # Perform bilinear interpolation
-        S_interp = (
-            S_ll * (1 - w_mu) * (1 - w_c) +
-            S_lu * w_mu * (1 - w_c) +
-            S_ul * (1 - w_mu) * w_c +
-            S_uu * w_mu * w_c
-        )
-        
-        return float(S_interp)  # Ensure we return a scalar float
-    
-    # Handle delta = 1 case with c columns
-    else:
-        # Extract n and k_min from the first row index to handle 'n=%d, k_min=%d, k=%d' format
-        first_row = S_df.index[0]
-        parts = first_row.split(', ')
-        n_part = parts[0]
-        k_min_part = parts[1] if len(parts) > 1 else None
-        
-        # Find the right row based on k value
-        row_matches = [i for i, idx in enumerate(S_df.index) if f', k={k}' in idx]
-        if not row_matches:
-            print(f"Error: No row found for k={k} in delta=1 format")
-            return None
-            
-        row_idx = S_df.index[row_matches[0]]
-        
-        # Get available c values from columns
-        c_columns = [float(col.split('=')[1]) for col in S_df.columns]
-        c_lower = max([c for c in c_columns if c <= c_val], default=c_columns[0])
-        c_upper = min([c for c in c_columns if c >= c_val], default=c_columns[-1])
-        
-        if c_lower == c_upper:
-            c_upper = c_columns[min(c_columns.index(c_lower) + 1, len(c_columns)-1)]
-        
-        # Safe lookup function
-        def get_value(row_idx, c_val):
-            try:
-                col_label = f'c={c_val:.1f}'
-                value = S_df.loc[row_idx, col_label]
-                return value.iloc[0] if hasattr(value, 'iloc') else value
-            except (KeyError, ValueError) as e:
-                print(f"Warning: Error accessing {row_idx}, {col_label}: {e}")
-                return 0.0
-        
-        # Get the values for linear interpolation
-        S_lower = get_value(row_idx, c_lower)
-        S_upper = get_value(row_idx, c_upper)
-        
-        # Calculate interpolation weight
-        w_c = (c_val - c_lower) / (c_upper - c_lower) if c_upper != c_lower else 0
-        
-        # Perform linear interpolation
-        S_interp = S_lower * (1 - w_c) + S_upper * w_c
-        
-        return float(S_interp)  # Ensure we return a scalar float
+    _check_table_labels(S_df)
+    rows = [i for i, label in enumerate(S_df.index)
+            if int(_label_fields(label)['k']) == k]
+    if not rows:
+        raise KeyError(f"Stage k={k} is not in the table.")
+    if S_df.columns[0].startswith('mu='):
+        means = [float(_label_fields(col)['mu']) for col in S_df.columns]
+        costs = [float(_label_fields(S_df.index[i])['c']) for i in rows]
+        ml, mh, wm = _grid_bracket(means, mu_val)
+        cl, ch, wc = _grid_bracket(costs, c_val)
+        lower = (1 - wm) * S_df.iloc[rows[cl], ml] + wm * S_df.iloc[rows[cl], mh]
+        upper = (1 - wm) * S_df.iloc[rows[ch], ml] + wm * S_df.iloc[rows[ch], mh]
+        return float((1 - wc) * lower + wc * upper)
+    if len(rows) != 1:
+        raise ValueError(f"Multiple rows found for stage k={k}.")
+    costs = [float(_label_fields(col)['c']) for col in S_df.columns]
+    lower, upper, weight = _grid_bracket(costs, c_val)
+    return float((1 - weight) * S_df.iloc[rows[0], lower]
+                 + weight * S_df.iloc[rows[0], upper])
 
 
 # =========================================
@@ -748,122 +600,52 @@ def get_S_value(S_df, k, mu_val, c_val):
 # This routine scans horizons n for each k and reports the last horizon
 # associated with that critical sample size, matching Algorithm 2.
 
-def data_n_min(mu, sigma, alpha0, nu0, delta, beta, G, k_upper):    
-    """
-    Algorithm 2:
-    Compute the maximum horizon associated with each k in the finite-horizon
-    k*(n, δ) lookup table.  The function name is retained for compatibility.
+def data_n_min(mu, sigma, alpha0, nu0, delta, beta, G, k_upper, *,
+               n_upper=None, convergence_tol=1e-6):
+    """Scan for the last horizon associated with each k (Algorithm 2).
 
-    Returns
-    -------
-    pandas.DataFrame
-        Columns ['k', 'n_max'] with strings 'Null-*' when not applicable.
+    A finite n_max is reported only after observing a strict crossing.
+    Otherwise n_max is NaN; status distinguishes a horizon cap, numerical
+    stabilization, and an excluded stage. n_checked records the last horizon
+    tested. Stabilization is not a certified infinite-horizon bound.
+    Set convergence_tol=0 to disable the stabilization shortcut.
     """
-    # Determine k_min based on sigma
-    if sigma == 0:
-        k_min = max(math.floor(2 - 2 * alpha0), 1)
-    else:
-        k_min = 1
-    
-    # For all other cases, proceed with normal calculation
-    k_value = k_min
-    n_start = k_value + 2
-    Results = []
-    if delta<=0.998:
-        n_upper=500
-    else:
-        n_upper=3000
-    while k_value <= k_upper:
-        try:
-            if nu0 + k_value == 1:
-                Results.append([k_value, 'Null-Fully Responsive'])
-            else:
-                twoalpha = 2*alpha0 + k_value
-                nu = nu0 + k_value
-                
-                # Calculate Lambda and tau
-                try:
-                    Lambda = np.sqrt((1 - (1/nu)**2) / twoalpha)
-                    tau = (1 - delta/nu)/Lambda
-                    
-                    # For delta < 1, calculate mu_star for use in convergence check
-                    if abs(delta - 1.0) >= 1e-10:  # delta < 1
-                        mu_star = 1/((nu0 + k_value)*Lambda)
-                    
-                    S_0 = 0
-                    n = max(n_start, k_value + 2)
-                    bound = 0
-                    
-                    while True:
-                        # Compute S0 for current n
-                        S0_result = S_c0(mu, sigma, alpha0, nu0, n, delta, beta, G)
-                        
-                        # Get S0 value - for delta=1, mu_val is ignored
-                        try:
-                            S0_prev = S_0
-                            if abs(delta - 1.0) < 1e-10:  # delta = 1
-                                S0_val = get_S0_value(S0_result, k_value, None)
-                            else:  # delta < 1
-                                S0_val = get_S0_value(S0_result, k_value, mu_star)
-                                
-                            S_0 = float(S0_val)
-                        except Exception as e:
-                            print(f"Warning: Error getting S0 value: {e}")
-                            S_0 = 0.0
-                        
-                        # Different convergence checks for delta=1 vs delta<1
-                        if delta==1:  # delta = 1
-                            pass
-                        else:  # delta < 1
-                            # For delta<1, check convergence with G-dependent threshold
-                            if n > k_value + 2:
-                                try:
-                                    # For larger G, threshold decreases proportionally
-                                    convergence_threshold = 1e-6
-                                    
-                                    if abs(S_0 - S0_prev) < convergence_threshold or n >= n_upper+1:
-                                        bound = 1
-                                        print(f"Difference: {abs(S_0 - S0_prev):.6f}")
-                                        break
-                                except Exception as e:
-                                    print(f"Warning: Error in convergence check: {e}")
-                        
-                        # Check if S0 exceeds tau
-                        if S_0 > tau:
-                            break
-                        n += 1
-                    
-                    if bound == 1:
-                        for k in range(k_value, k_upper + 1):
-                            Results.append([k, 'Null'])
-                        break
-                    
-                    n_max = n - 1
-                    n_start = n_max
-                    Results.append([k_value, n_max])
-                    print(f"k={k_value}, n_max={n_max}, S_0={S_0}, tau={tau}")
-                    
-                except (ValueError, ZeroDivisionError) as e:
-                    # Handle calculation errors (like division by zero)
-                    print(f"Warning: Calculation error for k={k_value}: {e}")
-                    Results.append([k_value, 'Null-Calculation Error'])
-        except Exception as e:
-            print(f"Error processing k={k_value}: {e}")
-            Results.append([k_value, 'Null-Error'])
-        
-        k_value += 1
-    
-    # Make sure we have entries for every admissible k value.
-    k_values_in_results = [row[0] for row in Results]
+    if not 0 < delta <= 1:
+        raise ValueError("delta must lie in (0, 1].")
+    if convergence_tol < 0:
+        raise ValueError("convergence_tol must be nonnegative.")
+    k_min = max(math.floor(2 - 2 * alpha0), 1) if sigma == 0 else 1
+    if n_upper is None:
+        n_upper = 500 if delta <= 0.998 else 3000
+    results = []
     for k in range(k_min, k_upper + 1):
-        if k not in k_values_in_results:
-            Results.append([k, 'Null-Missing'])
-    
-    # Sort results by k value
-    Results.sort(key=lambda x: x[0])
-    
-    # Create DataFrame with headers
-    df = pd.DataFrame(Results, columns=['k', 'n_max'])
+        if nu0 + k <= 1:
+            results.append([k, np.nan, 'excluded-stage', np.nan])
+            continue
+        omega = math.sqrt((2 * alpha0 + k) / ((nu0 + k) ** 2 - 1))
+        tau = (nu0 + k - delta) * omega
+        previous = None
+        checked = np.nan
+        status, n_max = 'horizon-cap', np.nan
+        for n in range(k + 2, n_upper + 1):
+            table = S_c0(mu, sigma, alpha0, nu0, n, delta, beta, G)
+            value = get_S0_value(table, k, None if delta == 1 else omega)
+            checked = n
+            crossed = value > tau
+            if k == 1 and not crossed:
+                omega2 = math.sqrt((2 * alpha0 + 2) / ((nu0 + 2) ** 2 - 1))
+                crossed = get_S0_value(table, 2, omega2) > (nu0 + 2 - delta) * omega2
+            # Crossing must be checked before a small successive-horizon change.
+            if crossed:
+                n_max, status = n - 1, 'crossing-found'
+                break
+            if (delta < 1 and previous is not None
+                    and abs(value - previous) < convergence_tol):
+                status = 'numerical-stabilization'
+                break
+            previous = value
+        results.append([k, n_max, status, checked])
+    df = pd.DataFrame(results, columns=['k', 'n_max', 'status', 'n_checked'])
     df.index.name = 'Index'
     return df
 
@@ -879,8 +661,10 @@ def threshold(k, mu_prev, sigma_prev, alpha0, nu0, delta, S_df, C,
     The gain from continuation is evaluated as a function of the current offer
     ``X``. Sign-changing roots are refined by bisection; roots that fall on the
     grid are retained directly. If neither is found, convex minimization checks
-    for a tangent root. The returned list contains zero, one, or two offer-value
-    thresholds in increasing order.
+    for a tangent root or a negative minimum between grid points. A negative
+    minimum brackets a root with each positive grid endpoint. The grid range
+    must contain the crossings. The returned list contains zero, one, or two
+    offer-value thresholds in increasing order.
     """
     nu = nu0 + k
     twoalpha = 2*alpha0 + k
@@ -895,7 +679,7 @@ def threshold(k, mu_prev, sigma_prev, alpha0, nu0, delta, S_df, C,
     Lambda = math.sqrt(Lambda_squared)
     base_scale_squared = max(1e-12, (twoalpha - 1)*sigma_prev**2)
     base_scale = math.sqrt(base_scale_squared)
-    is_delta_one = abs(delta - 1.0) < 1e-10
+    is_delta_one = delta == 1.0
 
     def gain(X):
         innovation = X - mu_prev
@@ -903,14 +687,11 @@ def threshold(k, mu_prev, sigma_prev, alpha0, nu0, delta, S_df, C,
         sigma_post = Lambda*math.sqrt(base_scale_squared + innovation**2)
         scaled_cost = C/sigma_post
         scaled_mu = mu_post/sigma_post
-        try:
-            S_value = get_S_value(
-                S_df, k, None if is_delta_one else scaled_mu, scaled_cost
-            )
-        except (KeyError, TypeError, ValueError, ZeroDivisionError):
-            return np.nan
+        S_value = get_S_value(
+            S_df, k, None if is_delta_one else scaled_mu, scaled_cost
+        )
         if S_value is None or not np.isfinite(S_value):
-            return np.nan
+            raise ValueError("Threshold search requires finite foresight values.")
         return delta*mu_post - X + sigma_post*S_value - C
 
     # X = mu_{k-1} + base_scale*tan(theta) maps the finite theta interval
@@ -942,18 +723,33 @@ def threshold(k, mu_prev, sigma_prev, alpha0, nu0, delta, S_df, C,
             )
             roots.append(float(root))
 
-    # A double root need not produce a sign change.
+    # A tangent root or two roots in one grid interval need not change signs
+    # at the sampled points. Include minima next to either grid boundary.
     if not roots:
         i_min = int(np.argmin(gain_values))
-        if 0 < i_min < len(offer_grid) - 1:
-            result = minimize_scalar(
-                gain,
-                bounds=(offer_grid[i_min - 1], offer_grid[i_min + 1]),
-                method="bounded",
-                options={"xatol": tol},
-            )
-            if result.success and abs(result.fun) <= tol:
+        result = minimize_scalar(
+            gain,
+            bounds=(
+                offer_grid[max(0, i_min - 1)],
+                offer_grid[min(len(offer_grid) - 1, i_min + 1)],
+            ),
+            method="bounded",
+            options={"xatol": tol},
+        )
+        if result.success and np.isfinite(result.fun):
+            if abs(result.fun) <= tol:
                 roots.append(float(result.x))
+            elif result.fun < -tol:
+                for endpoint, value in (
+                    (offer_grid[0], gain_values[0]),
+                    (offer_grid[-1], gain_values[-1]),
+                ):
+                    if value > 0:
+                        left, right = sorted((endpoint, result.x))
+                        roots.append(float(bisect(
+                            gain, left, right, xtol=tol,
+                            rtol=max(tol, 4*np.finfo(float).eps),
+                        )))
 
     roots.sort()
     deduped = []
@@ -1065,65 +861,33 @@ def S_infinite(
     )
 
 def k_doublestar(mu, sigma, alpha0, nu0, delta, beta, G, max_k=100):
+    """Return the first admissible k with S_infinite(k, omega_k, 0) <= tau_k.
+
+    Stage 1 is omitted when stage 2 probes, as in Algorithm 4.
+    Returns None when no crossing is found through max_k; convergence or
+    lookup failures propagate rather than being reported as a boundary.
     """
-    Algorithm 4 (derived quantity):
-    Compute k**(δ) as the smallest k with S0_infinite(k, μ*, 0) < τ_k for δ<1.
-    """
-    if delta >= 1.0:
-        raise ValueError("This function is only for delta < 1. For delta=1, use a different approach.")
-    
-    # Compute the infinite-horizon S0 values
-    S0_inf_df = S_c0_infinite(
-        mu, sigma, alpha0, nu0, delta, beta, G, k_upper=max_k
+    if not 0 < delta < 1:
+        raise ValueError("This function requires 0 < delta < 1.")
+    k_min = max(math.floor(2 - 2 * alpha0), 1) if sigma == 0 else 1
+    if max_k < k_min:
+        return None
+    table = S_c0_infinite(
+        mu, sigma, alpha0, nu0, delta, beta, G, k_upper=max(max_k, 2)
     )
-    
-    # Determine k_min based on sigma
-    if sigma == 0:
-        k_min = max(math.floor(2 - 2 * alpha0), 1)
-    else:
-        k_min = 1
-    
-    # Start from k_min
-    k = k_min
-    
-    # For each k, check if S0(k, mu_star) < tau_k
-    while k <= max_k:
-        # Skip invalid k values where nu0 + k = 1
-        if abs(nu0 + k - 1.0) < 1e-10:
-            k += 1
+
+    def gap(k):
+        omega = math.sqrt((2 * alpha0 + k) / ((nu0 + k) ** 2 - 1))
+        return get_S0_value(table, k, omega) - (nu0 + k - delta) * omega
+
+    for k in range(k_min, max_k + 1):
+        if nu0 + k <= 1:
             continue
-        
-        # Calculate parameters for this k
-        nu = nu0 + k
-        twoalpha = 2 * alpha0 + k
-        
-        # Calculate Lambda and tau
-        Lambda_squared = max(1e-10, (1 - (1/nu)**2) / twoalpha)
-        Lambda = np.sqrt(Lambda_squared)
-        tau = (1 - delta/nu)/Lambda
-        
-        # Calculate mu_star
-        mu_star = 1/(nu*Lambda)
-        
-        # Get S0 value for this k
-        try:
-            S0_val = get_S0_value(S0_inf_df, k, mu_star)
-            if S0_val is None:
-                break  # k exceeds available values
-            
-            S0 = float(S0_val.iloc[0] if hasattr(S0_val, 'iloc') else S0_val)
-            
-            # Check if S0 < tau
-            if S0 < tau:
-                return k  # Found k**
-        except (KeyError, ValueError, AttributeError) as e:
-            print(f"Error at k={k}: {e}")
-            break
-        
-        k += 1
-    
-    # If no k** found up to max_k
-    return max_k + 1
+        if k == 1 and gap(2) > 0:
+            continue
+        if gap(k) <= 0:
+            return k
+    return None
 
 def delta_star(mu, sigma, alpha0, nu0, beta, G, tol=1e-5, max_iter=100):
     """
@@ -1182,9 +946,9 @@ def delta_star(mu, sigma, alpha0, nu0, beta, G, tol=1e-5, max_iter=100):
                 delta_high = delta_mid
                 
         except Exception as e:
-            print(f"Error in iteration {iterations}: {e}")
-            # Be conservative if computation fails
-            delta_high = delta_mid
+            raise RuntimeError(
+                f"Discount search failed at delta={delta_mid}; no boundary was inferred."
+            ) from e
     
     return 0.5*(delta_low + delta_high)
 
@@ -1240,9 +1004,9 @@ def delta_k_star(k, mu, sigma, alpha0, nu0, beta, G, tol=5e-5, max_iter=100):
                 delta_high = delta_mid
                 
         except Exception as e:
-            print(f"Error in iteration {iterations}: {e}")
-            # Be conservative if computation fails
-            delta_high = delta_mid
+            raise RuntimeError(
+                f"Discount search failed at delta={delta_mid}; no boundary was inferred."
+            ) from e
     
     return 0.5*(delta_low + delta_high)
 

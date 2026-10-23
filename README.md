@@ -111,14 +111,26 @@ python -c "import algorithm; print('ok')"
 
 ## Reproducibility Notes
 
-* Every numerical result reported in the paper uses `G=400`, exposed as
-  `PAPER_GRID_SIZE`.
+* The default resolution is `G=400`, exposed as `PAPER_GRID_SIZE`. The paper's
+  companion identifies entries refined with an independent, finer-grid solver;
+  those entries need not be reproduced at the default resolution.
 * The state grids are deterministic given `(G, rho, Z, ita)`. The predictive
   innovation is integrated over the full real line using Gauss--Legendre
   quadrature after the transformation `u = tan(pi*z/2)`.
 * Numba may change runtime but not results.
 * For very high $\delta$ the code doubles the finite truncation horizon until
   the requested stages converge in sup norm; see the Algorithm 4 functions.
+* Table labels retain full-precision grid coordinates. Use `get_S_value` or
+  `get_S0_value` rather than formatting labels by hand. Previously saved tables
+  with duplicate rounded labels must be recomputed. Both helpers interpolate
+  linearly, using the adjacent end interval for extrapolation outside a grid.
+* `data_n_min` reports a finite `n_max` only after finding a crossing. Otherwise
+  `n_max` is `NaN`; `status` and `n_checked` distinguish the horizon cap,
+  numerical stabilization, and excluded stages. Set `convergence_tol=0` to
+  disable the stabilization shortcut. A small successive-horizon difference
+  is not a bound on the remaining infinite-horizon error.
+* `k_doublestar` returns `None` if no crossing is found through `max_k`.
+  Discount searches raise an error if a required value computation fails.
 
 ---
 
